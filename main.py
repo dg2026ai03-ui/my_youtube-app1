@@ -1,6 +1,18 @@
 import streamlit as st
 import pandas as pd
 import re
+import io
+import time
+from collections import Counter
+from datetime import datetime
+
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+import matplotlib.font_manager as fm
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -8,106 +20,93 @@ from googleapiclient.errors import HttpError
 # 페이지 설정
 # ============================================
 st.set_page_config(
-    page_title="유튜브 댓글 수집기",
+    page_title="유튜브 댓글 분석기 Pro",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ============================================
-# 스타일 적용
+# 세션 스테이트 초기화
 # ============================================
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        text-align: center;
-        color: #FF0000;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.1rem;
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    .comment-box {
-        background-color: #f9f9f9;
-        border-left: 4px solid #FF0000;
-        padding: 15px;
-        margin: 10px 0;
-        border-radius: 5px;
-    }
-    .comment-author {
-        font-weight: bold;
-        color: #333;
-        font-size: 0.95rem;
-    }
-    .comment-text {
-        color: #555;
-        margin-top: 5px;
-        font-size: 0.9rem;
-    }
-    .comment-meta {
-        color: #999;
-        font-size: 0.8rem;
-        margin-top: 5px;
-    }
-    .stat-card {
-        background: linear-gradient(135deg, #FF0000, #CC0000);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        text-align: center;
-    }
-</style>
-""", unsafe_allow_html=True)
+if "bookmarked" not in st.session_state:
+    st.session_state.bookmarked = set()
+if "all_results" not in st.session_state:
+    st.session_state.all_results = {}
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
 
 # ============================================
-# YouTube API 키 가져오기
+# 다크모드 스타일
 # ============================================
-def get_api_key():
-    """Streamlit secrets 또는 사이드바 입력에서 API 키를 가져옵니다."""
-    # 1순위: Streamlit secrets에서 가져오기
-    try:
-        api_key = st.secrets["YOUTUBE_API_KEY"]
-        if api_key:
-            return api_key
-    except (KeyError, FileNotFoundError):
-        pass
+def apply_theme():
+    if st.session_state.dark_mode:
+        st.markdown("""
+        <style>
+            .stApp { background-color: #1a1a2e; color: #e0e0e0; }
+            .comment-box {
+                background-color: #16213e;
+                border-left: 4px solid #e94560;
+                padding: 15px; margin: 10px 0; border-radius: 8px;
+                color: #e0e0e0;
+            }
+            .comment-author { font-weight: bold; color: #e94560; }
+            .comment-text { color: #c0c0c0; margin-top: 8px; line-height: 1.6; }
+            .comment-meta { color: #888; font-size: 0.8rem; margin-top: 8px; }
+            .stat-card {
+                background: linear-gradient(135deg, #e94560, #0f3460);
+                padding: 20px; border-radius: 12px; text-align: center; color: white;
+            }
+            .pos-tag { background-color: #00b894; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .neg-tag { background-color: #e94560; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .neu-tag { background-color: #636e72; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .header-gradient {
+                background: linear-gradient(90deg, #e94560, #0f3460);
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                font-size: 2.5rem; font-weight: 800; text-align: center; margin-bottom: 5px;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <style>
+            .comment-box {
+                background-color: #fafafa;
+                border-left: 4px solid #FF0000;
+                padding: 15px; margin: 10px 0; border-radius: 8px;
+            }
+            .comment-author { font-weight: bold; color: #333; }
+            .comment-text { color: #555; margin-top: 8px; line-height: 1.6; }
+            .comment-meta { color: #999; font-size: 0.8rem; margin-top: 8px; }
+            .stat-card {
+                background: linear-gradient(135deg, #FF0000, #CC0000);
+                padding: 20px; border-radius: 12px; text-align: center; color: white;
+            }
+            .pos-tag { background-color: #00b894; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .neg-tag { background-color: #d63031; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .neu-tag { background-color: #b2bec3; color: #333; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; }
+            .header-gradient {
+                background: linear-gradient(90deg, #FF0000, #ff6348);
+                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                font-size: 2.5rem; font-weight: 800; text-align: center; margin-bottom: 5px;
+            }
+        </style>
+        """, unsafe_allow_html=True)
 
-    # 2순위: 사이드바에서 직접 입력
-    st.sidebar.markdown("### 🔑 API 키 설정")
-    st.sidebar.markdown(
-        "YouTube Data API v3 키를 입력하세요.\n\n"
-        "[API 키 발급 방법 안내](https://console.cloud.google.com/apis/library/youtube.googleapis.com)"
-    )
-    api_key = st.sidebar.text_input(
-        "YouTube API Key",
-        type="password",
-        placeholder="AIza..."
-    )
-    return api_key
+apply_theme()
 
 
 # ============================================
-# 유튜브 비디오 ID 추출
+# 유틸리티 함수들
 # ============================================
 def extract_video_id(url):
-    """다양한 유튜브 URL 형식에서 비디오 ID를 추출합니다."""
     patterns = [
-        # 표준 URL: https://www.youtube.com/watch?v=VIDEO_ID
         r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',
-        # 짧은 URL: https://youtu.be/VIDEO_ID
         r'(?:https?://)?youtu\.be/([a-zA-Z0-9_-]{11})',
-        # 임베드 URL: https://www.youtube.com/embed/VIDEO_ID
         r'(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})',
-        # Shorts URL: https://www.youtube.com/shorts/VIDEO_ID
         r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
-        # 비디오 ID만 입력한 경우
         r'^([a-zA-Z0-9_-]{11})$',
     ]
-
     for pattern in patterns:
         match = re.search(pattern, url.strip())
         if match:
@@ -115,70 +114,84 @@ def extract_video_id(url):
     return None
 
 
-# ============================================
-# 비디오 정보 가져오기
-# ============================================
 def get_video_info(youtube, video_id):
-    """비디오의 기본 정보를 가져옵니다."""
     try:
-        request = youtube.videos().list(
-            part="snippet,statistics",
-            id=video_id
-        )
-        response = request.execute()
+        response = youtube.videos().list(
+            part="snippet,statistics", id=video_id
+        ).execute()
 
-        if response["items"]:
+        if response.get("items"):
             item = response["items"][0]
-            snippet = item["snippet"]
-            stats = item["statistics"]
-
+            snippet = item.get("snippet", {})
+            stats = item.get("statistics", {})
+            thumbs = snippet.get("thumbnails", {})
+            thumb_url = ""
+            for key in ["high", "medium", "default"]:
+                if key in thumbs:
+                    thumb_url = thumbs[key].get("url", "")
+                    break
             return {
                 "title": snippet.get("title", "제목 없음"),
                 "channel": snippet.get("channelTitle", "채널명 없음"),
                 "published": snippet.get("publishedAt", "")[:10],
-                "description": snippet.get("description", "")[:300],
-                "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", ""),
+                "thumbnail": thumb_url,
                 "view_count": int(stats.get("viewCount", 0)),
                 "like_count": int(stats.get("likeCount", 0)),
                 "comment_count": int(stats.get("commentCount", 0)),
             }
         return None
-    except HttpError as e:
-        st.error(f"비디오 정보를 가져오는 중 오류 발생: {e}")
+    except HttpError:
         return None
 
 
-# ============================================
-# 댓글 가져오기
-# ============================================
-def get_comments(youtube, video_id, max_comments=100, order="relevance"):
-    """유튜브 비디오의 댓글을 가져옵니다."""
+def get_comments(youtube, video_id, max_comments, order, include_replies=False, progress_bar=None):
     comments = []
     next_page_token = None
+    page_count = 0
 
     try:
         while len(comments) < max_comments:
-            request = youtube.commentThreads().list(
-                part="snippet",
+            response = youtube.commentThreads().list(
+                part="snippet,replies" if include_replies else "snippet",
                 videoId=video_id,
                 maxResults=min(100, max_comments - len(comments)),
                 order=order,
                 pageToken=next_page_token,
                 textFormat="plainText"
-            )
-            response = request.execute()
+            ).execute()
 
             for item in response.get("items", []):
-                snippet = item["snippet"]["topLevelComment"]["snippet"]
+                top = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
                 comment_data = {
-                    "작성자": snippet.get("authorDisplayName", "익명"),
-                    "댓글": snippet.get("textDisplay", ""),
-                    "좋아요": snippet.get("likeCount", 0),
-                    "작성일": snippet.get("publishedAt", "")[:10],
-                    "수정일": snippet.get("updatedAt", "")[:10],
-                    "답글수": item["snippet"].get("totalReplyCount", 0),
+                    "작성자": top.get("authorDisplayName", "익명"),
+                    "댓글": top.get("textDisplay", ""),
+                    "좋아요": int(top.get("likeCount", 0)),
+                    "작성일": top.get("publishedAt", "")[:10],
+                    "작성시간": top.get("publishedAt", ""),
+                    "답글수": int(item.get("snippet", {}).get("totalReplyCount", 0)),
+                    "유형": "댓글",
                 }
                 comments.append(comment_data)
+
+                # 답글 수집
+                if include_replies and "replies" in item:
+                    for reply_item in item["replies"].get("comments", []):
+                        r_snippet = reply_item.get("snippet", {})
+                        reply_data = {
+                            "작성자": r_snippet.get("authorDisplayName", "익명"),
+                            "댓글": r_snippet.get("textDisplay", ""),
+                            "좋아요": int(r_snippet.get("likeCount", 0)),
+                            "작성일": r_snippet.get("publishedAt", "")[:10],
+                            "작성시간": r_snippet.get("publishedAt", ""),
+                            "답글수": 0,
+                            "유형": "↳ 답글",
+                        }
+                        comments.append(reply_data)
+
+            page_count += 1
+            if progress_bar:
+                progress = min(len(comments) / max_comments, 1.0)
+                progress_bar.progress(progress, text=f"수집 중... {len(comments)}개 완료")
 
             next_page_token = response.get("nextPageToken")
             if not next_page_token:
@@ -187,14 +200,121 @@ def get_comments(youtube, video_id, max_comments=100, order="relevance"):
         return comments
 
     except HttpError as e:
-        error_reason = e.error_details[0]["reason"] if e.error_details else "unknown"
-        if error_reason == "commentsDisabled":
-            st.warning("⚠️ 이 동영상은 댓글이 비활성화되어 있습니다.")
-        elif error_reason == "forbidden":
-            st.error("🚫 API 키에 YouTube Data API v3 접근 권한이 없습니다.")
+        error_msg = str(e)
+        if "commentsDisabled" in error_msg:
+            st.warning("⚠️ 댓글이 비활성화된 영상입니다.")
+        elif "forbidden" in error_msg:
+            st.error("🚫 API 키 권한을 확인해주세요.")
         else:
-            st.error(f"❌ 댓글을 가져오는 중 오류 발생: {e}")
+            st.error(f"❌ 오류: {error_msg}")
         return []
+
+
+# ============================================
+# 감성 분석 (키워드 기반)
+# ============================================
+def analyze_sentiment(text):
+    positive_words = [
+        "좋아", "최고", "대박", "감동", "멋지", "훌륭", "사랑", "행복",
+        "추천", "완벽", "굿", "짱", "잘했", "응원", "화이팅", "기대",
+        "재밌", "재미있", "웃기", "힐링", "감사", "고마", "좋은",
+        "예쁘", "멋있", "놀라", "신기", "amazing", "good", "great",
+        "best", "love", "nice", "cool", "awesome", "fantastic",
+        "beautiful", "perfect", "wonderful", "excellent", "brilliant",
+        "ㅋㅋ", "ㅎㅎ", "👍", "❤️", "♥", "😍", "🔥", "👏",
+        "존경", "리스펙", "respect", "인정", "레전드", "legend",
+    ]
+    negative_words = [
+        "싫어", "별로", "최악", "실망", "짜증", "화나", "슬프",
+        "지루", "노잼", "구독취소", "안봐", "쓰레기", "거짓",
+        "나쁘", "못생", "역겹", "혐오", "bad", "worst", "hate",
+        "terrible", "awful", "boring", "ugly", "stupid",
+        "ㅡㅡ", "ㅠㅠ", "ㅜㅜ", "😡", "😤", "👎", "💢",
+        "광고", "사기", "거짓말", "실망", "후회",
+    ]
+
+    text_lower = text.lower()
+    pos_count = sum(1 for w in positive_words if w in text_lower)
+    neg_count = sum(1 for w in negative_words if w in text_lower)
+
+    if pos_count > neg_count:
+        return "긍정 😊"
+    elif neg_count > pos_count:
+        return "부정 😠"
+    else:
+        return "중립 😐"
+
+
+# ============================================
+# 워드클라우드 생성
+# ============================================
+def generate_wordcloud(texts):
+    combined = " ".join(texts)
+
+    # 불용어 (의미 없는 단어 제거)
+    stopwords = {
+        "이", "그", "저", "것", "수", "등", "들", "및", "에", "를", "의",
+        "가", "은", "는", "로", "으로", "에서", "와", "과", "도", "를",
+        "을", "다", "하다", "있다", "되다", "이다", "않다", "한", "할",
+        "하는", "합니다", "있는", "되는", "없는", "않는", "거", "좀",
+        "너무", "진짜", "정말", "되게", "약간", "그냥", "근데", "하고",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will",
+        "would", "could", "should", "may", "might", "shall", "can",
+        "this", "that", "these", "those", "i", "you", "he", "she",
+        "it", "we", "they", "me", "him", "her", "us", "them",
+        "my", "your", "his", "its", "our", "their", "and", "but",
+        "or", "not", "no", "so", "if", "of", "in", "to", "for",
+        "with", "on", "at", "from", "by", "about", "as", "into",
+        "ㅋㅋ", "ㅋㅋㅋ", "ㅋㅋㅋㅋ", "ㅎㅎ", "ㅎㅎㅎ",
+        "ㅠㅠ", "ㅜㅜ", "ㅠ", "ㅜ",
+    }
+
+    try:
+        # 한글 폰트 경로 시도 (클라우드 환경)
+        font_paths = [
+            "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+            "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+            "/usr/share/fonts/NanumGothic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+
+        font_path = None
+        for fp in font_paths:
+            try:
+                if fm.FontProperties(fname=fp).get_name():
+                    font_path = fp
+                    break
+            except Exception:
+                continue
+
+        wc_params = {
+            "width": 800,
+            "height": 400,
+            "background_color": "#1a1a2e" if st.session_state.dark_mode else "white",
+            "colormap": "magma" if st.session_state.dark_mode else "Reds",
+            "max_words": 100,
+            "stopwords": stopwords,
+            "min_font_size": 10,
+            "max_font_size": 80,
+            "prefer_horizontal": 0.7,
+        }
+
+        if font_path:
+            wc_params["font_path"] = font_path
+
+        wc = WordCloud(**wc_params).generate(combined)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.imshow(wc, interpolation="bilinear")
+        ax.axis("off")
+        fig.patch.set_facecolor("#1a1a2e" if st.session_state.dark_mode else "white")
+        plt.tight_layout(pad=0)
+        return fig
+
+    except Exception as e:
+        st.warning(f"워드클라우드 생성 중 오류: {e}")
+        return None
 
 
 # ============================================
@@ -202,218 +322,246 @@ def get_comments(youtube, video_id, max_comments=100, order="relevance"):
 # ============================================
 def main():
     # 헤더
-    st.markdown('<div class="main-header">🎬 유튜브 댓글 수집기</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">유튜브 영상 링크를 입력하면 댓글을 수집하고 분석합니다</div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-gradient">🎬 유튜브 댓글 분석기 Pro</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="text-align:center;color:#888;margin-bottom:2rem;">'
+        '댓글 수집 · 감성 분석 · 워드클라우드 · 트렌드 분석</p>',
+        unsafe_allow_html=True
+    )
 
-    # API 키 가져오기
-    api_key = get_api_key()
+    # ── 사이드바 ──
+    st.sidebar.markdown("## 🎬 유튜브 댓글 분석기")
+
+    # 다크모드 토글
+    st.sidebar.markdown("### 🌙 테마")
+    dark = st.sidebar.toggle("다크 모드", value=st.session_state.dark_mode)
+    if dark != st.session_state.dark_mode:
+        st.session_state.dark_mode = dark
+        st.rerun()
+
+    # API 키
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔑 API 키")
+    api_key = ""
+    try:
+        api_key = st.secrets["YOUTUBE_API_KEY"]
+        st.sidebar.success("✅ API 키 연결됨 (secrets)")
+    except Exception:
+        api_key = st.sidebar.text_input("YouTube API Key", type="password", placeholder="AIza...")
 
     if not api_key:
         st.info(
             "👈 사이드바에서 YouTube Data API v3 키를 입력해주세요.\n\n"
-            "**API 키 발급 방법:**\n"
+            "**API 키 발급:**\n"
             "1. [Google Cloud Console](https://console.cloud.google.com/) 접속\n"
-            "2. 새 프로젝트 생성\n"
-            "3. 'YouTube Data API v3' 검색 후 사용 설정\n"
-            "4. 사용자 인증 정보 → API 키 만들기"
+            "2. 프로젝트 생성 → YouTube Data API v3 사용 설정\n"
+            "3. 사용자 인증 정보 → API 키 만들기"
         )
-        return
+        st.stop()
 
-    # YouTube API 클라이언트 생성
     try:
         youtube = build("youtube", "v3", developerKey=api_key)
     except Exception as e:
-        st.error(f"YouTube API 연결 실패: {e}")
-        return
+        st.error(f"API 연결 실패: {e}")
+        st.stop()
 
-    # ── 입력 영역 ──
-    st.markdown("---")
-    col_input, col_btn = st.columns([4, 1])
-
-    with col_input:
-        url = st.text_input(
-            "🔗 유튜브 링크 입력",
-            placeholder="https://www.youtube.com/watch?v=... 또는 https://youtu.be/...",
-            label_visibility="collapsed"
-        )
-
-    # ── 사이드바 옵션 ──
+    # ── 수집 옵션 ──
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚙️ 수집 옵션")
-
-    max_comments = st.sidebar.slider(
-        "최대 댓글 수",
-        min_value=10,
-        max_value=500,
-        value=100,
-        step=10,
-        help="한 번에 가져올 최대 댓글 수를 설정합니다."
-    )
-
+    max_comments = st.sidebar.slider("최대 댓글 수", 10, 1000, 200, 10)
     order = st.sidebar.radio(
-        "정렬 기준",
-        options=["relevance", "time"],
-        format_func=lambda x: "인기순 🔥" if x == "relevance" else "최신순 🕐",
-        help="댓글 정렬 방식을 선택합니다."
+        "정렬", ["relevance", "time"],
+        format_func=lambda x: "인기순 🔥" if x == "relevance" else "최신순 🕐"
+    )
+    include_replies = st.sidebar.checkbox("답글(대댓글)도 수집", value=True)
+
+    # ── 모드 선택 ──
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📌 모드 선택")
+    mode = st.sidebar.radio(
+        "수집 모드",
+        ["단일 영상 분석", "여러 영상 비교 (최대 5개)"],
+        label_visibility="collapsed"
     )
 
-    with col_btn:
-        search_clicked = st.button("🔍 댓글 수집", use_container_width=True, type="primary")
+    # ============================================
+    # 단일 영상 분석 모드
+    # ============================================
+    if mode == "단일 영상 분석":
+        st.markdown("---")
+        url = st.text_input(
+            "🔗 유튜브 링크를 붙여넣으세요",
+            placeholder="https://www.youtube.com/watch?v=..."
+        )
+        search_clicked = st.button("🔍 댓글 수집 & 분석 시작", type="primary", use_container_width=True)
 
-    # ── 댓글 수집 실행 ──
-    if search_clicked and url:
-        video_id = extract_video_id(url)
+        if search_clicked:
+            if not url:
+                st.warning("⚠️ 링크를 입력해주세요.")
+                st.stop()
 
-        if not video_id:
-            st.error("❌ 올바른 유튜브 URL을 입력해주세요.")
-            return
+            video_id = extract_video_id(url)
+            if not video_id:
+                st.error("❌ 올바른 유튜브 URL이 아닙니다.")
+                st.stop()
 
-        # 비디오 정보 가져오기
-        with st.spinner("📺 영상 정보를 불러오는 중..."):
-            video_info = get_video_info(youtube, video_id)
+            # 영상 정보
+            with st.spinner("📺 영상 정보 로딩..."):
+                video_info = get_video_info(youtube, video_id)
 
-        if video_info:
-            # 비디오 정보 표시
+            if video_info:
+                st.markdown("---")
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    if video_info["thumbnail"]:
+                        st.image(video_info["thumbnail"], use_container_width=True)
+                with c2:
+                    st.subheader(video_info["title"])
+                    st.write(f"**채널:** {video_info['channel']} · **업로드:** {video_info['published']}")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("👁️ 조회수", f"{video_info['view_count']:,}")
+                    m2.metric("👍 좋아요", f"{video_info['like_count']:,}")
+                    m3.metric("💬 댓글수", f"{video_info['comment_count']:,}")
+
+            # 댓글 수집
             st.markdown("---")
-            col_thumb, col_info = st.columns([1, 2])
+            progress_bar = st.progress(0, text="수집 준비 중...")
+            comments = get_comments(youtube, video_id, max_comments, order, include_replies, progress_bar)
+            progress_bar.empty()
 
-            with col_thumb:
-                if video_info["thumbnail"]:
-                    st.image(video_info["thumbnail"], use_container_width=True)
+            if not comments:
+                st.warning("수집된 댓글이 없습니다.")
+                st.stop()
 
-            with col_info:
-                st.markdown(f"### 📺 {video_info['title']}")
-                st.markdown(f"**채널:** {video_info['channel']}")
-                st.markdown(f"**업로드일:** {video_info['published']}")
-
-                # 통계
-                stat_col1, stat_col2, stat_col3 = st.columns(3)
-                with stat_col1:
-                    st.metric("👁️ 조회수", f"{video_info['view_count']:,}")
-                with stat_col2:
-                    st.metric("👍 좋아요", f"{video_info['like_count']:,}")
-                with stat_col3:
-                    st.metric("💬 댓글수", f"{video_info['comment_count']:,}")
-
-        # 댓글 가져오기
-        with st.spinner(f"💬 댓글을 수집하는 중... (최대 {max_comments}개)"):
-            comments = get_comments(youtube, video_id, max_comments, order)
-
-        if comments:
             df = pd.DataFrame(comments)
 
-            st.markdown("---")
-            st.markdown(f"### 💬 수집된 댓글 ({len(comments)}개)")
+            # 감성 분석 추가
+            with st.spinner("🧠 감성 분석 중..."):
+                df["감성"] = df["댓글"].apply(analyze_sentiment)
+                df["글자수"] = df["댓글"].str.len()
 
-            # ── 탭으로 보기 방식 선택 ──
-            tab1, tab2 = st.tabs(["📋 카드 보기", "📊 테이블 보기"])
+            st.success(f"✅ 총 {len(df)}개 댓글 수집 완료! (댓글 {len(df[df['유형']=='댓글'])}개 + 답글 {len(df[df['유형']=='↳ 답글'])}개)")
 
-            # 카드 보기
+            # 세션에 저장
+            st.session_state.all_results[video_id] = {
+                "info": video_info,
+                "df": df
+            }
+
+            # ── 탭 구성 ──
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                "💬 댓글 보기",
+                "📊 통계 & 차트",
+                "☁️ 워드클라우드",
+                "😊 감성 분석",
+                "📈 시간 트렌드",
+                "🔖 북마크"
+            ])
+
+            # ── TAB 1: 댓글 보기 ──
             with tab1:
-                # 검색 필터
-                search_term = st.text_input("🔍 댓글 내 검색", placeholder="키워드를 입력하세요...")
+                st.subheader(f"💬 댓글 ({len(df)}개)")
 
-                filtered_df = df.copy()
+                # 필터
+                fc1, fc2, fc3 = st.columns([2, 1, 1])
+                with fc1:
+                    search_term = st.text_input("🔍 댓글 검색", placeholder="키워드 입력...", key="tab1_search")
+                with fc2:
+                    type_filter = st.selectbox("유형", ["전체", "댓글만", "답글만"])
+                with fc3:
+                    sentiment_filter = st.selectbox("감성", ["전체", "긍정 😊", "부정 😠", "중립 😐"])
+
+                filtered = df.copy()
                 if search_term:
-                    filtered_df = filtered_df[
-                        filtered_df["댓글"].str.contains(search_term, case=False, na=False)
-                    ]
-                    st.info(f"'{search_term}' 검색 결과: {len(filtered_df)}개")
+                    filtered = filtered[filtered["댓글"].str.contains(search_term, case=False, na=False)]
+                if type_filter == "댓글만":
+                    filtered = filtered[filtered["유형"] == "댓글"]
+                elif type_filter == "답글만":
+                    filtered = filtered[filtered["유형"] == "↳ 답글"]
+                if sentiment_filter != "전체":
+                    filtered = filtered[filtered["감성"] == sentiment_filter]
 
-                # 댓글 카드 표시
-                for idx, row in filtered_df.iterrows():
-                    st.markdown(f"""
-                    <div class="comment-box">
-                        <div class="comment-author">👤 {row['작성자']}</div>
-                        <div class="comment-text">{row['댓글']}</div>
-                        <div class="comment-meta">
-                            👍 {row['좋아요']} &nbsp;&nbsp;|&nbsp;&nbsp;
-                            💬 답글 {row['답글수']}개 &nbsp;&nbsp;|&nbsp;&nbsp;
-                            📅 {row['작성일']}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                st.info(f"필터 결과: {len(filtered)}개")
 
-            # 테이블 보기
+                # 정렬 옵션
+                sort_option = st.selectbox(
+                    "정렬",
+                    ["기본순", "좋아요 높은순", "좋아요 낮은순", "최신순", "오래된순", "글자수 긴순"],
+                    key="sort_tab1"
+                )
+                sort_map = {
+                    "좋아요 높은순": ("좋아요", False),
+                    "좋아요 낮은순": ("좋아요", True),
+                    "최신순": ("작성일", False),
+                    "오래된순": ("작성일", True),
+                    "글자수 긴순": ("글자수", False),
+                }
+                if sort_option in sort_map:
+                    col_name, asc = sort_map[sort_option]
+                    filtered = filtered.sort_values(col_name, ascending=asc)
+
+                # 페이지네이션
+                page_size = 20
+                total_pages = max(1, (len(filtered) - 1) // page_size + 1)
+                page = st.number_input("페이지", 1, total_pages, 1, key="page_tab1")
+                start_idx = (page - 1) * page_size
+                page_df = filtered.iloc[start_idx:start_idx + page_size]
+
+                for idx, row in page_df.iterrows():
+                    sentiment_class = "pos-tag" if "긍정" in row["감성"] else ("neg-tag" if "부정" in row["감성"] else "neu-tag")
+                    type_icon = "💬" if row["유형"] == "댓글" else "↪️"
+
+                    bookmark_key = f"bm_{idx}"
+                    col_comment, col_bm = st.columns([20, 1])
+
+                    with col_comment:
+                        st.markdown(f"""
+<div class="comment-box">
+    <div class="comment-author">{type_icon} {row['작성자']}
+        <span class="{sentiment_class}">{row['감성']}</span>
+    </div>
+    <div class="comment-text">{row['댓글']}</div>
+    <div class="comment-meta">
+        👍 {row['좋아요']} &nbsp;|&nbsp;
+        💬 답글 {row['답글수']}개 &nbsp;|&nbsp;
+        📅 {row['작성일']} &nbsp;|&nbsp;
+        📝 {row['글자수']}자
+    </div>
+</div>
+                        """, unsafe_allow_html=True)
+
+                    with col_bm:
+                        if st.button("🔖", key=bookmark_key, help="북마크"):
+                            if idx in st.session_state.bookmarked:
+                                st.session_state.bookmarked.discard(idx)
+                            else:
+                                st.session_state.bookmarked.add(idx)
+
+                st.caption(f"페이지 {page} / {total_pages}")
+
+            # ── TAB 2: 통계 & 차트 ──
             with tab2:
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    height=500,
-                    column_config={
-                        "좋아요": st.column_config.NumberColumn("👍 좋아요", format="%d"),
-                        "답글수": st.column_config.NumberColumn("💬 답글", format="%d"),
-                    }
-                )
+                st.subheader("📊 댓글 통계")
 
-            # ── 다운로드 버튼 ──
-            st.markdown("---")
-            col_dl1, col_dl2, col_dl3 = st.columns([1, 1, 2])
+                s1, s2, s3, s4, s5 = st.columns(5)
+                only_comments = df[df["유형"] == "댓글"]
+                s1.metric("댓글 수", f"{len(only_comments)}개")
+                s2.metric("답글 수", f"{len(df) - len(only_comments)}개")
+                s3.metric("평균 좋아요", f"{df['좋아요'].mean():.1f}")
+                s4.metric("최다 좋아요", f"{df['좋아요'].max()}")
+                s5.metric("평균 글자수", f"{df['글자수'].mean():.0f}자")
 
-            with col_dl1:
-                csv_data = df.to_csv(index=False, encoding="utf-8-sig")
-                st.download_button(
-                    label="📥 CSV 다운로드",
-                    data=csv_data,
-                    file_name=f"youtube_comments_{video_id}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+                st.markdown("---")
 
-            with col_dl2:
-                # Excel 다운로드 (선택적)
-                try:
-                    import io
-                    buffer = io.BytesIO()
-                    df.to_excel(buffer, index=False, engine="openpyxl")
-                    st.download_button(
-                        label="📥 Excel 다운로드",
-                        data=buffer.getvalue(),
-                        file_name=f"youtube_comments_{video_id}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet",
-                        use_container_width=True
+                # 좋아요 분포
+                col_chart1, col_chart2 = st.columns(2)
+
+                with col_chart1:
+                    st.markdown("#### 👍 좋아요 분포")
+                    fig_likes = px.histogram(
+                        df, x="좋아요", nbins=30,
+                        color_discrete_sequence=["#e94560" if st.session_state.dark_mode else "#FF0000"],
+                        template="plotly_dark" if st.session_state.dark_mode else "plotly_white"
                     )
-                except ImportError:
-                    st.info("Excel 다운로드를 위해 openpyxl 패키지가 필요합니다.")
-
-            # ── 간단한 통계 ──
-            st.markdown("---")
-            st.markdown("### 📊 간단한 댓글 통계")
-
-            stat1, stat2, stat3, stat4 = st.columns(4)
-            with stat1:
-                st.metric("총 댓글 수", f"{len(df)}개")
-            with stat2:
-                avg_likes = df["좋아요"].mean()
-                st.metric("평균 좋아요", f"{avg_likes:.1f}")
-            with stat3:
-                max_likes = df["좋아요"].max()
-                st.metric("최다 좋아요", f"{max_likes}")
-            with stat4:
-                avg_length = df["댓글"].str.len().mean()
-                st.metric("평균 글자수", f"{avg_length:.0f}자")
-
-            # 좋아요 TOP 5
-            st.markdown("#### 🏆 좋아요 TOP 5 댓글")
-            top5 = df.nlargest(5, "좋아요")[["작성자", "댓글", "좋아요"]].reset_index(drop=True)
-            top5.index = top5.index + 1
-            st.dataframe(top5, use_container_width=True)
-
-        elif url:
-            st.warning("수집된 댓글이 없습니다.")
-
-    elif search_clicked and not url:
-        st.warning("⚠️ 유튜브 링크를 입력해주세요.")
-
-    # ── 푸터 ──
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: #999; font-size: 0.85rem;'>"
-        "당곡고등학교 학습용 유튜브 댓글 수집기 | YouTube Data API v3 활용"
-        "</div>",
-        unsafe_allow_html=True
-    )
-
-
-if __name__ == "__main__":
-    main()
+                    fig_likes.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
+                    
